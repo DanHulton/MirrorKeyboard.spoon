@@ -25,16 +25,46 @@ obj.license = "MIT - https://opensource.org/licenses/MIT"
 obj.rightToLeft = 'rtl'
 
 -- obj.leftToRight -- Not implemented yet.
+-- obj.customOrientation -- Not implemented yet.
 
-local _mirrorMapping = {
-  q = { primary = "p", secondary = "\\", tertiary = nil }
+local _rtlMapping = {
+  -- This is done via the system key eventtap event
+  -- caps_lock = { default = "return", secondary = "caps_lock" },
+
+  ["`"] = { default = "delete", tertiary = "`" },
+  ["1"] = { default = nil, primary = "0", secondary = "=", tertiary = nil },
+  ["2"] = { default = nil, primary = "9", secondary = "-", tertiary = nil },
+  ["3"] = { default = nil, primary = "8", secondary = nil, tertiary = nil },
+  ["4"] = { default = nil, primary = "7", secondary = nil, tertiary = nil },
+  ["5"] = { default = nil, primary = "6", secondary = nil, tertiary = nil },
+
+  q = { default = nil, primary = "p", secondary = "\\", tertiary = nil },
+  w = { default = nil, primary = "o", secondary = "]", tertiary = "up" },
+  e = { default = nil, primary = "i", secondary = "[", tertiary = nil },
+  r = { default = nil, primary = "u", secondary = nil, tertiary = nil },
+  t = { default = nil, primary = "y", secondary = nil, tertiary = nil },
+
+  a = { default = nil, primary = ";", secondary = "'", tertiary = "left" },
+  s = { default = nil, primary = "l", secondary = ";", tertiary = "down" },
+  d = { default = nil, primary = "k", secondary = nil, tertiary = "right" },
+  f = { default = nil, primary = "j", secondary = nil, tertiary = nil },
+  g = { default = nil, primary = "h", secondary = nil, tertiary = nil },
+
+  z = { default = nil, primary = ".", secondary = "/", tertiary = nil },
+  x = { default = nil, primary = ",", secondary = ".", tertiary = nil },
+  c = { default = nil, primary = "m", secondary = ",", tertiary = nil },
+  v = { default = nil, primary = "n", secondary = nil, tertiary = nil },
 }
+
+-- local _ltrMapping = {} -- Not implemented yet
+-- local _customMapping -- Not implemented yet
 
 -- Internal variables
 local _orientation = obj.rightToLeft
 local _enabled = false
 local _deck
-local _tap
+local _keyDownTap
+local _systemKeyDownTap
 local _modifierPrimary = false
 local _modifierSecondary = false
 local _modifierTertiary = false
@@ -42,21 +72,26 @@ local _modifierTertiary = false
 -- Internal function to call when a Streamdeck button has been pressed.
 -- Updates local modifier state.
 local function _streamdeckButton(deck, buttonId, pressed)
-  -- Primary (middle, F15, 0x71, 113)
-  if buttonId == 2 then _modifierPrimary = pressed
-  -- Secondary (right, F16, 0x6a, 106)
-  elseif buttonId == 3 then _modifierSecondary = pressed
-  -- Tertiary (left, F17, 0x40, 64)
-  elseif buttonId == 1 then _modifierTertiary = pressed
-  end
+  if _enabled then
+    -- Primary (middle, F15, 0x71, 113)
+    if buttonId == 2 then _modifierPrimary = pressed
+    -- Secondary (right, F16, 0x6a, 106)
+    elseif buttonId == 3 then _modifierSecondary = pressed
+    -- Tertiary (left, F17, 0x40, 64)
+    elseif buttonId == 1 then _modifierTertiary = pressed
+    end
 
-  log.d('Button #' .. buttonId .. " - " .. (pressed and 'down' or 'up'))
+    log.d('Button #' .. buttonId .. " - " .. (pressed and 'down' or 'up'))
+  else
+    if pressed then hs.alert("ℹ️ Keyboard mirroring not enabled.") end
+  end
 end
 
 -- Internal function to call when a Streamdeck has been discovered
 local function _streamdeckDiscovery(connected, deck)
   if connected then
     _deck = deck
+    _deck:buttonCallback(_streamdeckButton)
     log.d('Streamdeck Pedal connected.')
   end
 end
@@ -84,17 +119,17 @@ local function _keyDown(event)
   end
 
   local key = hs.keycodes.map[event:getKeyCode()]
-  local remap = _mirrorMapping[key]
+  local remap = _rtlMapping[key]
 
   -- If key is not remapped, just pass the event along.
   if remap == nil then
     return false
   end
 
-  if _modifierPrimary then newKey = remap['primary']
-  elseif _modifierSecondary then newKey = remap['secondary'] or key
-  elseif _modifierTertiary then newKey = remap['tertiary'] or key
-  else newKey = key
+  if _modifierPrimary then newKey = (remap['primary'] or remap['default'] or key)
+  elseif _modifierSecondary then newKey = (remap['secondary'] or remap['default'] or key)
+  elseif _modifierTertiary then newKey = (remap['tertiary'] or remap['default'] or key)
+  else newKey = (remap['default'] or key)
   end
 
   log.d(key .. ' remapped to ' .. newKey)
@@ -106,15 +141,39 @@ local function _keyDown(event)
   return true
 end
 
+-- Internal function called whenever a system key is pressed when mirroring is enabled.
+-- Used to catch caps lock and remap to return
+local function _systemKeyDown(event)
+  local table = event:systemKey()
+  if table.down and table.key == "CAPS_LOCK" then
+    if _modifierSecondary then
+      -- Do nothing, if secondary is pressed, caps lock should work as normal
+    else
+      -- Send return instead of caps lock
+      local mods = _flagsToMods(event:getFlags())
+      hs.eventtap.keyStroke(mods, 'return', 1000)
+      hs.hid.capslock.toggle() -- change caps lock back, effectively "disabling" it
+    end
+  end
+end
+
 -- Internal function to toggle between keyboard active/inactive states,
 -- triggered by keypress.
 function obj:_toggle()
+  if _deck == nil then
+    hs.alert("⚠️ Streamdeck Pedal not connected!")
+    return
+  end
+
   _enabled = not _enabled
 
   if _enabled then
-    _tap:start()
+    _keyDownTap:start()
+    _systemKeyDownTap:start()
     _deck:buttonCallback(_streamdeckButton)
-  else _tap:stop()
+  else
+    _keyDownTap:stop()
+    _systemKeyDownTap:stop()
   end
 
   hs.alert(
@@ -130,9 +189,10 @@ end
 --- is disabled.
 function obj:init()
   hs.streamdeck.init(_streamdeckDiscovery)
-  _tap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, _keyDown)
+  _keyDownTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, _keyDown)
+  _systemKeyDownTap = hs.eventtap.new({hs.eventtap.event.types.systemDefined}, _systemKeyDown)
 
-  log.d('MirrorKeyboard initialized.')
+  log.i('MirrorKeyboard initialized.')
 end
 
 --- MirrorKeyboard:bindToHotkeys()
@@ -174,7 +234,7 @@ end
 ---
 --- Returns:
 ---  * The MirrorKeyboard object
-function obj:setOrientation(orientation)
+function obj:setOrientation(orientation, customMapping)
   if (orientation ~= self.rightToLeft) then
     log.e('Orientation "' .. (orientation or 'nil') .. '" is not supported.')
     return self
